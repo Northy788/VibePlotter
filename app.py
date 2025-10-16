@@ -4,6 +4,8 @@ import plotly.graph_objs as go
 import re
 import expression  # import expression.py
 from datetime import datetime, timedelta
+from multiprocessing import Pool, cpu_count
+import io # เพิ่ม io เข้ามาเพื่ออ่านไฟล์ในหน่วยความจำ
 
 st.set_page_config(page_title="VibePlotter", layout="wide")
 st.title("📊 VibePlotter")
@@ -42,41 +44,54 @@ def parse_simple_excel_formula(s):
 
     return s
 
+# ฟังก์ชันสำหรับประมวลผลไฟล์เดียว
+def process_file(file):
+    """
+    อ่านและประมวลผลไฟล์ CSV ที่อัปโหลด
+    - อ่านไฟล์ CSV
+    - แปลงสูตร Excel
+    - คืนค่าชื่อไฟล์, DataFrame และเซ็ตของคอลัมน์
+    """
+    file_content = file.getvalue() # อ่านข้อมูลไฟล์เป็น bytes
+    df = pd.read_csv(io.BytesIO(file_content), encoding='utf-8-sig')
+    df = df.applymap(parse_simple_excel_formula)
+    name = file.name
+    return name, df, set(df.columns)
+
+
 uploaded_files = st.file_uploader("📂 เลือกไฟล์ CSV", type="csv", accept_multiple_files=True)
 
 if uploaded_files:
-    with st.spinner("🔄 กำลังโหลดและประมวลผลไฟล์..."):
-        dataframes = {}
-        column_sets = []
+    with st.spinner("🔄 กำลังโหลดและประมวลผลไฟล์แบบ Multi-core..."):
+        # --- ส่วนที่ปรับปรุง ---
+        # ใช้ Pool เพื่อประมวลผลไฟล์พร้อมกัน
+        # โดยใช้จำนวน process เท่ากับจำนวน CPU core ที่มี
+        with Pool(processes=cpu_count()) as pool:
+            results = pool.map(process_file, uploaded_files)
+        # --------------------
 
-        for file in uploaded_files:
-            df = pd.read_csv(file, encoding='utf-8-sig')  # รองรับอักษรไทย
-            # แปลงสูตร Excel แบบง่ายในทุก cell ของ df
-            df = df.applymap(parse_simple_excel_formula)
-            
-            name = file.name
-            dataframes[name] = df
-            column_sets.append(set(df.columns))
+        dataframes = {name: df for name, df, _ in results}
+        column_sets = [cols for _, _, cols in results]
 
-        common_columns = sorted(set.intersection(*column_sets))
+
+        common_columns = sorted(set.intersection(*column_sets)) if column_sets else []
         if not common_columns:
             st.warning("❗ ไม่มี column ที่เหมือนกันในทุกไฟล์เพื่อใช้เป็นแกน X")
         else:
             st.markdown("### 🔢 เลือกแกน X (ต้องมีในทุกไฟล์) - เลือกได้มากกว่า 1 คอลัมน์")
-            x_cols = st.multiselect("เลือกแกน X", common_columns, default=common_columns[0])
+            x_cols = st.multiselect("เลือกแกน X", common_columns, default=[common_columns[0]])
 
             fig = go.Figure()
 
             for name, df in dataframes.items():
                 st.markdown(f"### 📄 การตั้งค่าสำหรับไฟล์: `{name}`")
                 
-                # แสดงตารางข้อมูลทั้งหมดของไฟล์
                 st.markdown("#### ตารางข้อมูลทั้งหมด:")
                 with st.expander(f"⚙️ ข้อมูลสถิติ", expanded=False):
                     st.dataframe(df.describe())
                 st.dataframe(df)
 
-                y_cols = st.multiselect(f"✅ เลือกคอลัมน์ Y ที่จะแสดง (ไฟล์: {name})", df.columns, key=f"ycol_{name}")
+                y_cols = st.multiselect(f"✅ เลือกคอลัมน์ Y ที่จะแสดง (ไฟล์: {name})", list(df.columns), key=f"ycol_{name}")
 
                 for col in y_cols:
                     with st.expander(f"⚙️ การตั้งค่าสำหรับ `{col}`", expanded=False):
@@ -131,7 +146,7 @@ if uploaded_files:
                 yaxis_title="ค่าที่แสดงผล",
                 height=700,
                     legend=dict(
-                    orientation="h",  # แนวนอน
+                    orientation="h",
                     yanchor="bottom",
                     y=-0.3,
                     xanchor="center",
